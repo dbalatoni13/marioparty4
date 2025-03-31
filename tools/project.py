@@ -1,6 +1,6 @@
 ###
 # decomp-toolkit project generator
-# Generates build.ninja and objdiff.json.
+# Generates build.ninja.
 #
 # This generator is intentionally project-agnostic
 # and shared between multiple projects. Any configuration
@@ -12,12 +12,11 @@
 
 import io
 import json
-import math
 import os
 import platform
 import sys
 from pathlib import Path
-from typing import IO, Any, Dict, Iterable, List, Optional, Set, Tuple, Union, cast
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
 
 from . import ninja_syntax
 from .ninja_syntax import serialize_path
@@ -47,7 +46,6 @@ class Object:
             "host": None,
             "lib": None,
             "mw_version": None,
-            "progress_category": None,
             "shift_jis": None,
             "source": name,
             "src_dir": None,
@@ -82,20 +80,6 @@ class Object:
         set_default("shift_jis", config.shift_jis)
         set_default("src_dir", config.src_dir)
 
-        # Validate progress categories
-        def check_category(category: str):
-            if not any(category == c.id for c in config.progress_categories):
-                sys.exit(
-                    f"Progress category '{category}' missing from config.progress_categories"
-                )
-
-        progress_category = obj.options["progress_category"]
-        if isinstance(progress_category, list):
-            for category in progress_category:
-                check_category(category)
-        elif progress_category is not None:
-            check_category(progress_category)
-
         # Resolve paths
         build_dir = config.out_path()
         obj.src_path = Path(obj.options["src_dir"]) / obj.options["source"]
@@ -109,12 +93,6 @@ class Object:
         obj.host_obj_path = build_dir / "host" / f"{base_name}.o"
         obj.ctx_path = build_dir / "src" / f"{base_name}.ctx"
         return obj
-
-
-class ProgressCategory:
-    def __init__(self, id: str, name: str) -> None:
-        self.id = id
-        self.name = name
 
 
 class ProjectConfig:
@@ -138,11 +116,8 @@ class ProjectConfig:
         self.wrapper: Optional[Path] = None  # If None, download wibo on Linux
         self.sjiswrap_tag: Optional[str] = None  # Git tag
         self.sjiswrap_path: Optional[Path] = None  # If None, download
-        self.objdiff_tag: Optional[str] = None  # Git tag
-        self.objdiff_path: Optional[Path] = None  # If None, download
 
         # Project config
-        self.non_matching: bool = False
         self.build_rels: bool = True  # Build REL files
         self.check_sha_path: Optional[Path] = None  # Path to version.sha1
         self.config_path: Optional[Path] = None  # Path to config.yml
@@ -158,6 +133,7 @@ class ProjectConfig:
         self.rel_empty_file: Optional[str] = (
             None  # Object name for generating empty RELs
         )
+        self.rel_version: Optional[int] = None
         self.shift_jis = (
             True  # Convert source files from UTF-8 to Shift JIS automatically
         )
@@ -174,25 +150,6 @@ class ProjectConfig:
             True  # Generate compile_commands.json for clangd
         )
         self.extra_clang_flags: List[str] = []  # Extra flags for clangd
-
-        # Progress output, progress.json and report.json config
-        self.progress = True  # Enable report.json generation and CLI progress output
-        self.progress_all: bool = True  # Include combined "all" category
-        self.progress_modules: bool = True  # Include combined "modules" category
-        self.progress_each_module: bool = (
-            False  # Include individual modules, disable for large numbers of modules
-        )
-        self.progress_categories: List[ProgressCategory] = []  # Additional categories
-        self.print_progress_categories: Union[bool, List[str]] = (
-            True  # Print additional progress categories in the CLI progress output
-        )
-
-        # Progress fancy printing
-        self.progress_use_fancy: bool = False
-        self.progress_code_fancy_frac: int = 0
-        self.progress_code_fancy_item: str = ""
-        self.progress_data_fancy_frac: int = 0
-        self.progress_data_fancy_item: str = ""
 
     def validate(self) -> None:
         required_attrs = [
@@ -319,13 +276,12 @@ def load_build_config(
     return build_config
 
 
-# Generate build.ninja, objdiff.json and compile_commands.json
+# Generate build.ninja and compile_commands.json
 def generate_build(config: ProjectConfig) -> None:
     config.validate()
     objects = config.objects()
     build_config = load_build_config(config, config.out_path() / "config.json")
     generate_build_ninja(config, objects, build_config)
-    generate_objdiff_config(config, objects, build_config)
     generate_compile_commands(config, objects, build_config)
 
 
@@ -364,23 +320,12 @@ def generate_build_ninja(
     n.comment("Tooling")
 
     build_path = config.out_path()
-    progress_path = build_path / "progress.json"
-    report_path = build_path / "report.json"
     build_tools_path = config.build_dir / "tools"
     download_tool = config.tools_dir / "download_tool.py"
     n.rule(
         name="download_tool",
         command=f"$python {download_tool} $tool $out --tag $tag",
         description="TOOL $out",
-    )
-
-    decompctx = config.tools_dir / "decompctx.py"
-    n.rule(
-        name="decompctx",
-        command=f"$python {decompctx} $in -o $out -d $out.d",
-        description="CTX $in",
-        depfile="$out.d",
-        deps="gcc",
     )
 
     cargo_rule_written = False
@@ -427,35 +372,6 @@ def generate_build_ninja(
         )
     else:
         sys.exit("ProjectConfig.dtk_tag missing")
-
-    if config.objdiff_path is not None and config.objdiff_path.is_file():
-        objdiff = config.objdiff_path
-    elif config.objdiff_path is not None:
-        objdiff = build_tools_path / "release" / f"objdiff-cli{EXE}"
-        write_cargo_rule()
-        n.build(
-            outputs=objdiff,
-            rule="cargo",
-            inputs=config.objdiff_path / "Cargo.toml",
-            implicit=config.objdiff_path / "Cargo.lock",
-            variables={
-                "bin": "objdiff-cli",
-                "target": build_tools_path,
-            },
-        )
-    elif config.objdiff_tag:
-        objdiff = build_tools_path / f"objdiff-cli{EXE}"
-        n.build(
-            outputs=objdiff,
-            rule="download_tool",
-            implicit=download_tool,
-            variables={
-                "tool": "objdiff-cli",
-                "tag": config.objdiff_tag,
-            },
-        )
-    else:
-        sys.exit("ProjectConfig.objdiff_tag missing")
 
     if config.sjiswrap_path:
         sjiswrap = config.sjiswrap_path
@@ -530,7 +446,7 @@ def generate_build_ninja(
     n.build(
         outputs="tools",
         rule="phony",
-        inputs=[dtk, sjiswrap, wrapper, compilers, binutils, objdiff],
+        inputs=[dtk, sjiswrap, wrapper, compilers, binutils],
     )
     n.newline()
 
@@ -824,15 +740,6 @@ def generate_build_ninja(
                 ),
             )
 
-            # Add ctx build rule
-            if obj.ctx_path is not None:
-                n.build(
-                    outputs=obj.ctx_path,
-                    rule="decompctx",
-                    inputs=src_path,
-                    implicit=decompctx,
-                )
-
             # Add host build rule
             if obj.options["host"] and obj.host_obj_path is not None:
                 n.build(
@@ -996,6 +903,8 @@ def generate_build_ninja(
         flags = "-w"
         if len(build_config["links"]) > 1:
             flags += " -q"
+        if config.rel_version is not None:
+            flags += f" -v {config.rel_version}"
         n.rule(
             name="makerel",
             command=f"{dtk} rel make {flags} -c $config $names @$rspfile",
@@ -1051,9 +960,6 @@ def generate_build_ninja(
             )
             n.newline()
 
-        # Add all build steps needed post-build (re-building archives and such)
-        postbuild_implicit = write_custom_step("post-build")
-
         ###
         # Helper rule for building all source files
         ###
@@ -1076,125 +982,6 @@ def generate_build_ninja(
         )
         n.newline()
 
-        ###
-        # Check hash
-        ###
-        n.comment("Check hash")
-        ok_path = build_path / "ok"
-        quiet = "-q " if len(link_steps) > 3 else ""
-        n.rule(
-            name="check",
-            command=f"{dtk} shasum {quiet} -c $in -o $out",
-            description="CHECK $in",
-        )
-        n.build(
-            outputs=ok_path,
-            rule="check",
-            inputs=config.check_sha_path,
-            implicit=[dtk, *link_outputs, *postbuild_implicit],
-        )
-        n.newline()
-
-        ###
-        # Calculate progress
-        ###
-        n.comment("Calculate progress")
-        n.rule(
-            name="progress",
-            command=f"$python {configure_script} $configure_args progress",
-            description="PROGRESS",
-        )
-        n.build(
-            outputs=progress_path,
-            rule="progress",
-            implicit=[
-                ok_path,
-                configure_script,
-                python_lib,
-                report_path,
-            ],
-        )
-
-        ###
-        # Generate progress report
-        ###
-        n.comment("Generate progress report")
-        n.rule(
-            name="report",
-            command=f"{objdiff} report generate -o $out",
-            description="REPORT",
-        )
-        report_implicit: List[str | Path] = [objdiff, "all_source"]
-        n.build(
-            outputs=report_path,
-            rule="report",
-            implicit=report_implicit,
-        )
-
-        ###
-        # Helper tools
-        ###
-        # TODO: make these rules work for RELs too
-        dol_link_step = link_steps[0]
-        dol_elf_path = dol_link_step.partial_output()
-        n.comment("Check for mismatching symbols")
-        n.rule(
-            name="dol_diff",
-            command=f"{dtk} -L error dol diff $in",
-            description=f"DIFF {dol_elf_path}",
-        )
-        n.build(
-            inputs=[config.config_path, dol_elf_path],
-            outputs="dol_diff",
-            rule="dol_diff",
-        )
-        n.build(
-            outputs="diff",
-            rule="phony",
-            inputs="dol_diff",
-        )
-        n.newline()
-
-        n.comment("Apply symbols from linked ELF")
-        n.rule(
-            name="dol_apply",
-            command=f"{dtk} dol apply $in",
-            description=f"APPLY {dol_elf_path}",
-        )
-        n.build(
-            inputs=[config.config_path, dol_elf_path],
-            outputs="dol_apply",
-            rule="dol_apply",
-            implicit=[ok_path],
-        )
-        n.build(
-            outputs="apply",
-            rule="phony",
-            inputs="dol_apply",
-        )
-        n.newline()
-
-    ###
-    # Split DOL
-    ###
-    build_config_path = build_path / "config.json"
-    n.comment("Split DOL into relocatable objects")
-    n.rule(
-        name="split",
-        command=f"{dtk} dol split $in $out_dir",
-        description="SPLIT $in",
-        depfile="$out_dir/dep",
-        deps="gcc",
-    )
-    n.build(
-        inputs=config.config_path,
-        outputs=build_config_path,
-        rule="split",
-        implicit=dtk,
-        variables={"out_dir": build_path},
-    )
-    n.newline()
-
     ###
     # Regenerate on change
     ###
@@ -1209,7 +996,6 @@ def generate_build_ninja(
         outputs="build.ninja",
         rule="configure",
         implicit=[
-            build_config_path,
             configure_script,
             python_lib,
             python_lib_dir / "ninja_syntax.py",
@@ -1222,230 +1008,12 @@ def generate_build_ninja(
     # Default rule
     ###
     n.comment("Default rule")
-    if build_config:
-        if config.non_matching:
-            n.default(link_outputs)
-        elif config.progress:
-            n.default(progress_path)
-        else:
-            n.default(ok_path)
-    else:
-        n.default(build_config_path)
+    n.default(link_outputs)
 
     # Write build.ninja
     with open("build.ninja", "w", encoding="utf-8") as f:
         f.write(out.getvalue())
     out.close()
-
-
-# Generate objdiff.json
-def generate_objdiff_config(
-    config: ProjectConfig,
-    objects: Dict[str, Object],
-    build_config: Optional[Dict[str, Any]],
-) -> None:
-    if build_config is None:
-        return
-
-    # Load existing objdiff.json
-    existing_units = {}
-    if Path("objdiff.json").is_file():
-        with open("objdiff.json", "r", encoding="utf-8") as r:
-            existing_config = json.load(r)
-            existing_units = {unit["name"]: unit for unit in existing_config["units"]}
-
-    objdiff_config: Dict[str, Any] = {
-        "min_version": "2.0.0-beta.5",
-        "custom_make": "ninja",
-        "build_target": False,
-        "watch_patterns": [
-            "*.c",
-            "*.cp",
-            "*.cpp",
-            "*.h",
-            "*.hpp",
-            "*.inc",
-            "*.py",
-            "*.yml",
-            "*.txt",
-            "*.json",
-        ],
-        "units": [],
-        "progress_categories": [],
-    }
-
-    # decomp.me compiler name mapping
-    COMPILER_MAP = {
-        "GC/1.0": "mwcc_233_144",
-        "GC/1.1": "mwcc_233_159",
-        "GC/1.2.5": "mwcc_233_163",
-        "GC/1.2.5e": "mwcc_233_163e",
-        "GC/1.2.5n": "mwcc_233_163n",
-        "GC/1.3": "mwcc_242_53",
-        "GC/1.3.2": "mwcc_242_81",
-        "GC/1.3.2r": "mwcc_242_81r",
-        "GC/2.0": "mwcc_247_92",
-        "GC/2.5": "mwcc_247_105",
-        "GC/2.6": "mwcc_247_107",
-        "GC/2.7": "mwcc_247_108",
-        "GC/3.0a3": "mwcc_41_51213",
-        "GC/3.0a3.2": "mwcc_41_60126",
-        "GC/3.0a3.3": "mwcc_41_60209",
-        "GC/3.0a3.4": "mwcc_42_60308",
-        "GC/3.0a5": "mwcc_42_60422",
-        "GC/3.0a5.2": "mwcc_41_60831",
-        "GC/3.0": "mwcc_41_60831",
-        "Wii/1.0RC1": "mwcc_42_140",
-        "Wii/0x4201_127": "mwcc_42_142",
-        "Wii/1.0a": "mwcc_42_142",
-        "Wii/1.0": "mwcc_43_145",
-        "Wii/1.1": "mwcc_43_151",
-        "Wii/1.3": "mwcc_43_172",
-        "Wii/1.5": "mwcc_43_188",
-        "Wii/1.6": "mwcc_43_202",
-        "Wii/1.7": "mwcc_43_213",
-    }
-
-    def add_unit(
-        build_obj: Dict[str, Any], module_name: str, progress_categories: List[str]
-    ) -> None:
-        obj_path, obj_name = build_obj["object"], build_obj["name"]
-        base_object = Path(obj_name).with_suffix("")
-        name = str(Path(module_name) / base_object).replace(os.sep, "/")
-        unit_config: Dict[str, Any] = {
-            "name": name,
-            "target_path": obj_path,
-            "base_path": None,
-            "scratch": None,
-            "metadata": {
-                "complete": None,
-                "reverse_fn_order": None,
-                "source_path": None,
-                "progress_categories": progress_categories,
-                "auto_generated": build_obj["autogenerated"],
-            },
-            "symbol_mappings": None,
-        }
-
-        # Preserve existing symbol mappings
-        existing_unit = existing_units.get(name)
-        if existing_unit is not None:
-            unit_config["symbol_mappings"] = existing_unit.get("symbol_mappings")
-
-        obj = objects.get(obj_name)
-        if obj is None:
-            objdiff_config["units"].append(unit_config)
-            return
-
-        src_exists = obj.src_path is not None and obj.src_path.exists()
-        if src_exists:
-            unit_config["base_path"] = obj.src_obj_path
-            unit_config["metadata"]["source_path"] = obj.src_path
-
-        cflags = obj.options["cflags"]
-        reverse_fn_order = False
-        for flag in cflags:
-            if not flag.startswith("-inline "):
-                continue
-            for value in flag.split(" ")[1].split(","):
-                if value == "deferred":
-                    reverse_fn_order = True
-                elif value == "nodeferred":
-                    reverse_fn_order = False
-
-        # Filter out include directories
-        def keep_flag(flag):
-            return not flag.startswith("-i ") and not flag.startswith("-I ")
-
-        cflags = list(filter(keep_flag, cflags))
-
-        compiler_version = COMPILER_MAP.get(obj.options["mw_version"])
-        if compiler_version is None:
-            print(f"Missing scratch compiler mapping for {obj.options['mw_version']}")
-        else:
-            cflags_str = make_flags_str(cflags)
-            if len(obj.options["extra_cflags"]) > 0:
-                extra_cflags_str = make_flags_str(obj.options["extra_cflags"])
-                cflags_str += " " + extra_cflags_str
-            unit_config["scratch"] = {
-                "platform": "gc_wii",
-                "compiler": compiler_version,
-                "c_flags": cflags_str,
-            }
-            if src_exists:
-                unit_config["scratch"].update(
-                    {
-                        "ctx_path": obj.ctx_path,
-                        "build_ctx": True,
-                    }
-                )
-        category_opt: List[str] | str = obj.options["progress_category"]
-        if isinstance(category_opt, list):
-            progress_categories.extend(category_opt)
-        elif category_opt is not None:
-            progress_categories.append(category_opt)
-        unit_config["metadata"].update(
-            {
-                "complete": obj.completed,
-                "reverse_fn_order": reverse_fn_order,
-                "progress_categories": progress_categories,
-            }
-        )
-        objdiff_config["units"].append(unit_config)
-
-    # Add DOL units
-    for unit in build_config["units"]:
-        progress_categories = []
-        # Only include a "dol" category if there are any modules
-        # Otherwise it's redundant with the global report measures
-        if len(build_config["modules"]) > 0:
-            progress_categories.append("dol")
-        add_unit(unit, build_config["name"], progress_categories)
-
-    # Add REL units
-    for module in build_config["modules"]:
-        for unit in module["units"]:
-            progress_categories = []
-            if config.progress_modules:
-                progress_categories.append("modules")
-            if config.progress_each_module:
-                progress_categories.append(module["name"])
-            add_unit(unit, module["name"], progress_categories)
-
-    # Add progress categories
-    def add_category(id: str, name: str):
-        objdiff_config["progress_categories"].append(
-            {
-                "id": id,
-                "name": name,
-            }
-        )
-
-    if len(build_config["modules"]) > 0:
-        add_category("dol", "DOL")
-        if config.progress_modules:
-            add_category("modules", "Modules")
-        if config.progress_each_module:
-            for module in build_config["modules"]:
-                add_category(module["name"], module["name"])
-    for category in config.progress_categories:
-        add_category(category.id, category.name)
-
-    def cleandict(d):
-        if isinstance(d, dict):
-            return {k: cleandict(v) for k, v in d.items() if v is not None}
-        elif isinstance(d, list):
-            return [cleandict(v) for v in d]
-        else:
-            return d
-
-    # Write objdiff.json
-    with open("objdiff.json", "w", encoding="utf-8") as w:
-
-        def unix_path(input: Any) -> str:
-            return str(input).replace(os.sep, "/") if input else ""
-
-        json.dump(cleandict(objdiff_config), w, indent=2, default=unix_path)
 
 
 def generate_compile_commands(
@@ -1659,129 +1227,3 @@ def generate_compile_commands(
             return str(o)
 
         json.dump(clangd_config, w, indent=2, default=default_format)
-
-
-# Calculate, print and write progress to progress.json
-def calculate_progress(config: ProjectConfig) -> None:
-    config.validate()
-    out_path = config.out_path()
-    report_path = out_path / "report.json"
-    if not report_path.is_file():
-        sys.exit(f"Report file {report_path} does not exist")
-
-    report_data: Dict[str, Any] = {}
-    with open(report_path, "r", encoding="utf-8") as f:
-        report_data = json.load(f)
-
-    # Convert string numbers (u64) to int
-    def convert_numbers(data: Dict[str, Any]) -> None:
-        for key, value in data.items():
-            if isinstance(value, str) and value.isdigit():
-                data[key] = int(value)
-
-    convert_numbers(report_data["measures"])
-    for category in report_data.get("categories", []):
-        convert_numbers(category["measures"])
-
-    # Output to GitHub Actions job summary, if available
-    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
-    summary_file: Optional[IO[str]] = None
-    if summary_path:
-        summary_file = open(summary_path, "a", encoding="utf-8")
-        summary_file.write("```\n")
-
-    def progress_print(s: str) -> None:
-        print(s)
-        if summary_file:
-            summary_file.write(s + "\n")
-
-    # Print human-readable progress
-    progress_print("Progress:")
-
-    def print_category(name: str, measures: Dict[str, Any]) -> None:
-        total_code = measures.get("total_code", 0)
-        matched_code = measures.get("matched_code", 0)
-        matched_code_percent = measures.get("matched_code_percent", 0)
-        total_data = measures.get("total_data", 0)
-        matched_data = measures.get("matched_data", 0)
-        matched_data_percent = measures.get("matched_data_percent", 0)
-        total_functions = measures.get("total_functions", 0)
-        matched_functions = measures.get("matched_functions", 0)
-        complete_code_percent = measures.get("complete_code_percent", 0)
-        total_units = measures.get("total_units", 0)
-        complete_units = measures.get("complete_units", 0)
-
-        progress_print(
-            f"  {name}: {matched_code_percent:.2f}% matched, {complete_code_percent:.2f}% linked ({complete_units} / {total_units} files)"
-        )
-        progress_print(
-            f"    Code: {matched_code} / {total_code} bytes ({matched_functions} / {total_functions} functions)"
-        )
-        progress_print(
-            f"    Data: {matched_data} / {total_data} bytes ({matched_data_percent:.2f}%)"
-        )
-
-    print_category("All", report_data["measures"])
-    for category in report_data.get("categories", []):
-        if config.print_progress_categories is True or (
-            isinstance(config.print_progress_categories, list)
-            and category["id"] in config.print_progress_categories
-        ):
-            print_category(category["name"], category["measures"])
-
-    if config.progress_use_fancy:
-        measures = report_data["measures"]
-        total_code = measures.get("total_code", 0)
-        total_data = measures.get("total_data", 0)
-        if total_code == 0 or total_data == 0:
-            return
-        code_frac = measures.get("complete_code", 0) / total_code
-        data_frac = measures.get("complete_data", 0) / total_data
-
-        progress_print(
-            "\nYou have {} out of {} {} and {} out of {} {}.".format(
-                math.floor(code_frac * config.progress_code_fancy_frac),
-                config.progress_code_fancy_frac,
-                config.progress_code_fancy_item,
-                math.floor(data_frac * config.progress_data_fancy_frac),
-                config.progress_data_fancy_frac,
-                config.progress_data_fancy_item,
-            )
-        )
-
-    # Finalize GitHub Actions job summary
-    if summary_file:
-        summary_file.write("```\n")
-        summary_file.close()
-
-    # Generate and write progress.json
-    progress_json: Dict[str, Any] = {}
-
-    def add_category(id: str, measures: Dict[str, Any]) -> None:
-        progress_json[id] = {
-            "code": measures.get("complete_code", 0),
-            "code/total": measures.get("total_code", 0),
-            "data": measures.get("complete_data", 0),
-            "data/total": measures.get("total_data", 0),
-            "matched_code": measures.get("matched_code", 0),
-            "matched_code/total": measures.get("total_code", 0),
-            "matched_data": measures.get("matched_data", 0),
-            "matched_data/total": measures.get("total_data", 0),
-            "matched_functions": measures.get("matched_functions", 0),
-            "matched_functions/total": measures.get("total_functions", 0),
-            "fuzzy_match": int(measures.get("fuzzy_match_percent", 0) * 100),
-            "fuzzy_match/total": 10000,
-            "units": measures.get("complete_units", 0),
-            "units/total": measures.get("total_units", 0),
-        }
-
-    if config.progress_all:
-        add_category("all", report_data["measures"])
-    else:
-        # Support for old behavior where "dol" was the main category
-        add_category("dol", report_data["measures"])
-    for category in report_data.get("categories", []):
-        add_category(category["id"], category["measures"])
-
-    with open(out_path / "progress.json", "w", encoding="utf-8") as w:
-        json.dump(progress_json, w, indent=2)

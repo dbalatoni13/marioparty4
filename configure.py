@@ -3,7 +3,7 @@
 ###
 # Generates build files for the project.
 # This file also includes the project configuration,
-# such as compiler flags and the object matching status.
+# such as compiler flags.
 #
 # Usage:
 #   python3 configure.py
@@ -19,9 +19,7 @@ from typing import Any, Dict, List
 
 from tools.project import (
     Object,
-    ProgressCategory,
     ProjectConfig,
-    calculate_progress,
     generate_build,
     is_windows,
 )
@@ -37,13 +35,6 @@ VERSIONS = [
 ]
 
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "mode",
-    choices=["configure", "progress"],
-    default="configure",
-    help="script mode (default: configure)",
-    nargs="?",
-)
 parser.add_argument(
     "-v",
     "--version",
@@ -89,18 +80,6 @@ if not is_windows():
         help="path to wibo or wine (optional)",
     )
 parser.add_argument(
-    "--dtk",
-    metavar="BINARY | DIR",
-    type=Path,
-    help="path to decomp-toolkit binary or source (optional)",
-)
-parser.add_argument(
-    "--objdiff",
-    metavar="BINARY | DIR",
-    type=Path,
-    help="path to objdiff-cli binary or source (optional)",
-)
-parser.add_argument(
     "--sjiswrap",
     metavar="EXE",
     type=Path,
@@ -111,18 +90,6 @@ parser.add_argument(
     action="store_true",
     help="print verbose output",
 )
-parser.add_argument(
-    "--non-matching",
-    dest="non_matching",
-    action="store_true",
-    help="builds equivalent (but non-matching) or modded objects",
-)
-parser.add_argument(
-    "--no-progress",
-    dest="progress",
-    action="store_false",
-    help="disable progress calculation",
-)
 args = parser.parse_args()
 
 config = ProjectConfig()
@@ -131,19 +98,12 @@ version_num = VERSIONS.index(config.version)
 
 # Apply arguments
 config.build_dir = args.build_dir
-config.dtk_path = args.dtk
-config.objdiff_path = args.objdiff
 config.binutils_path = args.binutils
 config.compilers_path = args.compilers
 config.generate_map = args.map
-config.non_matching = args.non_matching
 config.sjiswrap_path = args.sjiswrap
-config.progress = args.progress
 if not is_windows():
     config.wrapper = args.wrapper
-# Don't build asm unless we're --non-matching
-if not config.non_matching:
-    config.asm_dir = None
 
 # Tool versions
 config.binutils_tag = "2.42-1"
@@ -172,6 +132,8 @@ if args.debug:
 if args.map:
     config.ldflags.append("-mapunused")
 
+config.rel_version = 2
+
 # Base flags, common to most GC/Wii games.
 # Generally leave untouched, with overrides added below.
 cflags_base = [
@@ -198,9 +160,6 @@ cflags_base = [
     f"-DVERSION={version_num}",
     "-DMUSY_TARGET=MUSY_TARGET_DOLPHIN",
 ]
-
-if config.non_matching:
-    cflags_base.append("-DNON_MATCHING")
 
 # Debug flags
 if args.debug:
@@ -388,7 +347,7 @@ def Rel(lib_name, objects):
 
 Matching = True                   # Object matches and should be linked
 NonMatching = False               # Object does not match and should not be linked
-Equivalent = config.non_matching  # Object should be linked when configured with --non-matching
+Equivalent = True                 # Object should be linked when configured with --non-matching
 
 
 # Object is only matching for specific versions
@@ -1578,15 +1537,4 @@ config.libs = [
     ),
 ]
 
-# Optional extra categories for progress tracking
-config.progress_categories = []
-config.progress_each_module = args.verbose
-
-if args.mode == "configure":
-    # Write build.ninja and objdiff.json
-    generate_build(config)
-elif args.mode == "progress":
-    # Print progress and write progress.json
-    calculate_progress(config)
-else:
-    sys.exit("Unknown mode: " + args.mode)
+generate_build(config)
