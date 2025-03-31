@@ -124,6 +124,8 @@ class ProjectConfig:
         self.generate_map: bool = False  # Generate map file(s)
         self.asflags: Optional[List[str]] = None  # Assembler flags
         self.ldflags: Optional[List[str]] = None  # Linker flags
+        self.dol_ldscript: Optional[Path] = Path("loadscripts") / "dol_ldscript.lcf"
+        self.rel_ldscript: Optional[Path] = Path("loadscripts") / "dol_ldscript.lcf"
         self.libs: Optional[List[Library]] = None  # List of libraries
         self.linker_version: Optional[str] = None  # mwld version
         self.version: Optional[str] = None  # Version name
@@ -605,12 +607,13 @@ def generate_build_ninja(
         return path.parent / (path.name + ".MAP")
 
     class LinkStep:
-        def __init__(self, config: Dict[str, Any]) -> None:
+        def __init__(self, config: Dict[str, Any], dol_ldscript: Optional[Path], rel_ldscript: Optional[Path]) -> None:
             self.name: str = config["name"]
             self.module_id: int = config["module_id"]
-            self.ldscript: Optional[Path] = Path(config["ldscript"])
             self.entry = config["entry"]
             self.inputs: List[str] = []
+            self.dol_ldscript = dol_ldscript
+            self.rel_ldscript = rel_ldscript
 
         def add(self, obj: Path) -> None:
             self.inputs.append(serialize_path(obj))
@@ -631,7 +634,7 @@ def generate_build_ninja(
             n.comment(f"Link {self.name}")
             if self.module_id == 0:
                 elf_path = build_path / f"{self.name}.elf"
-                elf_ldflags = f"$ldflags -lcf {serialize_path(self.ldscript)}"
+                elf_ldflags = f"$ldflags -lcf {serialize_path(self.dol_ldscript)}"
                 if config.generate_map:
                     elf_map = map_path(elf_path)
                     elf_ldflags += f" -map {serialize_path(elf_map)}"
@@ -643,7 +646,7 @@ def generate_build_ninja(
                     inputs=self.inputs,
                     implicit=[
                         *precompile_implicit,
-                        self.ldscript,
+                        self.dol_ldscript,
                         *mwld_implicit,
                         *postcompile_implicit,
                     ],
@@ -654,7 +657,7 @@ def generate_build_ninja(
                 preplf_path = build_path / self.name / f"{self.name}.preplf"
                 plf_path = build_path / self.name / f"{self.name}.plf"
                 preplf_ldflags = "$ldflags -sdata 0 -sdata2 0 -r"
-                plf_ldflags = f"$ldflags -sdata 0 -sdata2 0 -r1 -lcf {serialize_path(self.ldscript)}"
+                plf_ldflags = f"$ldflags -sdata 0 -sdata2 0 -r1 -lcf {serialize_path(self.rel_ldscript)}"
                 if self.entry:
                     plf_ldflags += f" -m {self.entry}"
                     # -strip_partial is only valid with -m
@@ -680,7 +683,7 @@ def generate_build_ninja(
                     outputs=plf_path,
                     rule="link",
                     inputs=self.inputs,
-                    implicit=[self.ldscript, preplf_path, *mwld_implicit],
+                    implicit=[self.rel_ldscript, preplf_path, *mwld_implicit],
                     implicit_outputs=plf_map,
                     variables={"ldflags": plf_ldflags},
                 )
@@ -835,7 +838,7 @@ def generate_build_ninja(
                 )
 
         # Add DOL link step
-        link_step = LinkStep(build_config)
+        link_step = LinkStep(build_config, config.dol_ldscript, config.rel_ldscript)
         for unit in build_config["units"]:
             add_unit(unit, link_step)
         link_steps.append(link_step)
@@ -843,7 +846,7 @@ def generate_build_ninja(
         if config.build_rels:
             # Add REL link steps
             for module in build_config["modules"]:
-                module_link_step = LinkStep(module)
+                module_link_step = LinkStep(module, config.dol_ldscript, config.rel_ldscript)
                 for unit in module["units"]:
                     add_unit(unit, module_link_step)
                 # Add empty object to empty RELs

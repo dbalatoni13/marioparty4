@@ -133,6 +133,8 @@ if args.map:
     config.ldflags.append("-mapunused")
 
 config.rel_version = 2
+config.dol_ldscript = Path("loadscripts") / "dol_ldscript.lcf"
+config.rel_ldscript = Path("loadscripts") / "rel_ldscript.lcf"
 
 # Base flags, common to most GC/Wii games.
 # Generally leave untouched, with overrides added below.
