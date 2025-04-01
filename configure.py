@@ -349,7 +349,6 @@ def Rel(lib_name, objects):
 
 Matching = True                   # Object matches and should be linked
 NonMatching = False               # Object does not match and should not be linked
-Equivalent = True                 # Object should be linked when configured with --non-matching
 
 
 # Object is only matching for specific versions
@@ -381,7 +380,7 @@ config.libs = [
             Object(Matching, "game/sprman.c"),
             Object(Matching, "game/sprput.c"),
             Object(Matching, "game/hsfload.c"),
-            Object(Equivalent, "game/hsfdraw.c"),
+            Object(NonMatching, "game/hsfdraw.c"),
             Object(Matching, "game/hsfman.c"),
             Object(Matching, "game/hsfmotion.c"),
             Object(Matching, "game/hsfanim.c"),
