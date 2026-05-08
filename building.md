@@ -67,28 +67,7 @@ git submodule update --init --recursive
 ## Build C files:
   ```
   ninja
-  ```
-
-## Bundle into ISO:
-
-### Without uv
-
-```bash
-# Create venv and install dependencies
-python -m venv venv
-.\venv\Scripts\activate
-pip install pyisotools cutie
-
-# Run build_iso.py
-python tools/build_iso.py
-```
-
-### With uv
-
-```bash
-uv run tools/build_iso.py
-```
-  
+  ```  
 
 # Building the port
 **After you've built the files for GameCube, follow these instructions**:
